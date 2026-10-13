@@ -1,0 +1,61 @@
+name: Publish npm package
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published native release tag (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up publishing runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Verify release and package versions
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          node -e 'const expected = `v${require("./npm/package.json").version}`; if (process.env.RELEASE_TAG !== expected) throw new Error(`Release tag must be ${expected}`)'
+          python3 -c 'import json, re; cargo = re.search(r"^version = \"([^\"]+)\"", open("Cargo.toml").read(), re.M).group(1); assert cargo == json.load(open("npm/package.json"))["version"]'
+
+      - name: Verify published native release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          release_dir="$RUNNER_TEMP/termplete-release"
+          mkdir -p "$release_dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'termplete-*.tar.gz' --pattern SHA256SUMS --dir "$release_dir"
+          version="$(node -p 'require("./npm/package.json").version')"
+          python3 packaging/homebrew/generate_formula.py --version "$version" --checksums "$release_dir/SHA256SUMS" --output "$release_dir/termplete.rb"
+          (cd "$release_dir" && sha256sum -c SHA256SUMS)
+
+      - name: Test launcher
+        run: node tests/npm-install.js
+
+      - name: Check npm package contents
+        working-directory: npm
+        run: npm pack --dry-run
+
+      - name: Publish with npm trusted publishing
+        working-directory: npm
+        run: |
+          npm install --global 'npm@^11.5.1'
+          npm publish --access public

@@ -1,0 +1,40 @@
+{
+  "name": "termplete",
+  "version": "0.1.0",
+  "description": "Terminal autocomplete that learns your choices",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aft1n/termplete.git",
+    "directory": "npm"
+  },
+  "homepage": "https://github.com/aft1n/termplete#readme",
+  "bugs": {
+    "url": "https://github.com/aft1n/termplete/issues"
+  },
+  "keywords": [
+    "terminal",
+    "autocomplete",
+    "cli",
+    "zsh",
+    "bash"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "termplete": "bin/termplete.js",
+    "tp": "bin/tp.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node ../tests/npm-install.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

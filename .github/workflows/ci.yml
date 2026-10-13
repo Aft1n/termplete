@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux full suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install zsh on Linux
+        run: sudo apt-get update && sudo apt-get install --yes zsh
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --component clippy --component rustfmt
+          rustup default 1.89.0
+
+      - name: Cache Cargo dependencies and build outputs
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ubuntu-24.04-x86_64-unknown-linux-gnu
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --locked --all-targets
+
+      - name: Check distribution scripts
+        run: |
+          python3 tests/distribution.py
+          python3 tests/release.py
+
+      - name: Check npm launcher and package
+        run: node tests/npm-install.js
+
+      - name: Inspect npm package contents
+        working-directory: npm
+        run: npm pack --dry-run
+
+      - name: Build native binaries for integration tests
+        run: cargo build --locked --release --bin termplete --bin tp
+
+      - name: Test decision pipeline and interactive zsh
+        env:
+          TERMPLETE_TEST_BIN: ${{ github.workspace }}/target/x86_64-unknown-linux-gnu/release/termplete
+        run: |
+          python3 tests/lifecycle.py
+          python3 tests/shell_pause.py
+          python3 tests/decision.py
+          python3 tests/terminal.py
+
+      - name: Verify Cargo distribution
+        run: cargo package --locked --allow-dirty
+
+  macos:
+    name: macOS smoke tests
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_TARGET: aarch64-apple-darwin
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
+
+      - name: Cache Cargo dependencies and build outputs
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: macos-15-aarch64-apple-darwin
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run Rust tests
+        run: cargo test --locked --all-targets
+
+      - name: Build native binaries for integration tests
+        run: cargo build --locked --release --bin termplete --bin tp
+
+      - name: Test zsh setup and startup
+        env:
+          TERMPLETE_TEST_BIN: ${{ github.workspace }}/target/aarch64-apple-darwin/release/termplete
+        run: |
+          python3 tests/terminal.py \
+            TerminalTests.test_fresh_zsh_capture_reaches_prompt_without_recursive_startup_or_directory_change \
+            TerminalTests.test_setup_enables_all_future_zsh_sessions

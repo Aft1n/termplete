@@ -1,0 +1,16 @@
+Generated using the built-in image_gen tool.
+
+Initial prompt:
+Use case: logo-brand
+Asset type: finished logo image for the GitHub README of TermPlete, a Rust terminal autocomplete library/application that learns command history and offers inline AI suggestions.
+Primary request: create one appealing, polished, distinctive developer-tool logo, ready to use, consisting of a memorable compact terminal-inspired symbol above the exact wordmark "TermPlete".
+Scene/backdrop: genuinely transparent background.
+Subject: a confident, simple terminal prompt chevron flowing into a completion cursor; subtly communicate typed input continuing into a suggested completion through a short sequence of clean geometric strokes. Favor a single cohesive, recognizable symbol with generous negative space and a bold silhouette that also works at small size.
+Style/medium: precise flat vector-style branding rendered as a crisp high-resolution PNG, careful optical alignment, clean edges, professional open-source identity.
+Composition/framing: centered vertical logo lockup, substantial symbol on top and beautiful custom modern monospace-inspired wordmark underneath. Comfortable transparent padding around the complete lockup. One finished logo only, not a presentation board.
+Text (verbatim): "TermPlete" — uppercase T and P, all other letters lowercase, spelled T e r m P l e t e. Only this wordmark, no tagline or other text. Make typography legible, purposeful and balanced.
+Color treatment: a restrained terminal-inspired accent for the mark with high contrast; wordmark and symbol should be readable against both GitHub white and near-black surfaces, using deliberate contrasting outlines if needed.
+Constraints: actual alpha transparency, no canvas/background rectangle, no mockup, no watermark, no GitHub mascot, no robot, no brain, no decorative AI sparkle, no 3D, no glow, no gradients, no tiny details. This is the final usable logo asset.
+
+Final refinement prompt:
+Edit the supplied TermPlete logo into a finished flat logo. Preserve the exact correct "TermPlete" wordmark, terminal window, prompt chevron, ghost completion strokes, and green vertical cursor. Remove ALL glow, ALL shadow, ALL haze, ALL gradients, ALL surrounding black background. Everything outside the hard-edged logo shapes must be truly transparent alpha, including gaps between the mark and wordmark. Keep the terminal window interior solid dark charcoal, a crisp off-white window border, wordmark solid dark charcoal with thin clean off-white outline, and use just ONE green accent: change all three traffic-light window dots to the same subdued green instead of red/yellow/green. Render every shape completely flat with solid fills and crisp clean edges. No simulated transparency, no checkerboard painted into the image, no backdrop. Center the lockup within a landscape canvas with comfortable padding. This is a usable transparent PNG logo, not a poster.

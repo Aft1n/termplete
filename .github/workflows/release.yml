@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: check
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
+
+      - name: Install release target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
+
+      - name: Cache Cargo dependencies and build outputs
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ matrix.os }}-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Validate release tag and package version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.-]+)?$ ]]
+          package_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "termplete"))')"
+          test "$version" = "$package_version"
+          npm_version="$(python3 -c 'import json; print(json.load(open("npm/package.json"))["version"])')"
+          test "$version" = "$npm_version"
+
+      - name: Build release binaries
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --locked --release --bin termplete --bin tp
+          "target/$TARGET/release/termplete" --version
+          "target/$TARGET/release/tp" --version
+
+      - name: Create release archive
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/stage
+          cp "target/$TARGET/release/termplete" dist/stage/termplete
+          cp "target/$TARGET/release/tp" dist/stage/tp
+          COPYFILE_DISABLE=1 tar --format=ustar -czf "dist/termplete-$version-$TARGET.tar.gz" -C dist/stage termplete tp
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/termplete-*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Collect archives and generate checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            gh run download "$GITHUB_RUN_ID" --name "release-$target" --dir dist
+          done
+          version="${GITHUB_REF_NAME#v}"
+          (cd dist && sha256sum "termplete-$version-"*.tar.gz > SHA256SUMS)
+          cp scripts/install.sh dist/install.sh
+          cp LICENSE dist/LICENSE
+          python3 packaging/homebrew/generate_formula.py \
+            --version "$version" \
+            --checksums dist/SHA256SUMS \
+            --output dist/termplete.rb
+
+      - name: Create draft release, attach assets, and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag \
+              --generate-notes \
+              --draft
+          fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      - name: Check out default branch for Homebrew formula
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: homebrew-tap
+
+      - name: Publish Homebrew formula to default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p homebrew-tap/Formula
+          cp dist/termplete.rb homebrew-tap/Formula/termplete.rb
+          git -C homebrew-tap config user.name "github-actions[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Formula/termplete.rb
+          if git -C homebrew-tap diff --cached --quiet; then
+            echo "Homebrew formula is already current."
+            exit 0
+          fi
+          git -C homebrew-tap commit -m "chore(homebrew): update formula for ${RELEASE_TAG}"
+          git -C homebrew-tap push origin "HEAD:${DEFAULT_BRANCH}"

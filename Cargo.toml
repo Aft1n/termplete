@@ -1,0 +1,58 @@
+[package]
+name = "termplete"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+default-run = "tp"
+description = "Terminal autocomplete that learns your choices, with Automatic and On demand modes"
+license = "MIT"
+repository = "https://github.com/aft1n/termplete"
+readme = "README.md"
+keywords = ["terminal", "autocomplete", "llm", "cli", "zsh"]
+categories = ["command-line-utilities"]
+include = ["/src/**", "/shells/**", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/README.md", "/CONTRIBUTING.md", "/SECURITY.md", "/docs/**"]
+
+[[bin]]
+name = "termplete"
+path = "src/main.rs"
+
+[[bin]]
+name = "tp"
+path = "src/bin/tp.rs"
+
+[lib]
+name = "termplete"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+ctrlc = "3"
+dirs = "7"
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
+keyring = "4"
+parking_lot = "0.12"
+libc = "0.2"
+portable-pty = "0.9"
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+    "charset",
+    "http2",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shellexpand = "3"
+thiserror = "2"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
+
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

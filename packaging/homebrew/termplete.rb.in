@@ -1,0 +1,39 @@
+class Termplete < Formula
+  desc "Terminal autocomplete that learns your choices"
+  homepage "https://github.com/aft1n/termplete"
+  version "@@VERSION@@"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/aft1n/termplete/releases/download/v@@VERSION@@/termplete-@@VERSION@@-aarch64-apple-darwin.tar.gz"
+      sha256 "@@MAC_ARM64_SHA256@@"
+    elsif Hardware::CPU.intel?
+      url "https://github.com/aft1n/termplete/releases/download/v@@VERSION@@/termplete-@@VERSION@@-x86_64-apple-darwin.tar.gz"
+      sha256 "@@MAC_X64_SHA256@@"
+    else
+      odie "TermPlete supports Apple Silicon and Intel Macs"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "https://github.com/aft1n/termplete/releases/download/v@@VERSION@@/termplete-@@VERSION@@-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@@LINUX_ARM64_SHA256@@"
+    elsif Hardware::CPU.intel?
+      url "https://github.com/aft1n/termplete/releases/download/v@@VERSION@@/termplete-@@VERSION@@-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@@LINUX_X64_SHA256@@"
+    else
+      odie "TermPlete supports ARM64 and x86_64 Linux"
+    end
+  end
+
+  def install
+    bin.install "termplete", "tp"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/termplete --version")
+    assert_match version.to_s, shell_output("#{bin}/tp --version")
+  end
+end

@@ -1,0 +1,7 @@
+Generated using the built-in image_gen tool.
+
+Use case: logo-brand. Edit target: the attached existing TermPlete logo.
+User request: the upper terminal graphic is liked and MUST be preserved; change only the wordmark font below it.
+Invariants: keep the upper terminal window graphic exactly unchanged: its position, dimensions, rounded rectangular frame, dark interior, off-white border, three green dots, white chevron, white and gray completion strokes, and green cursor. Do not redraw, restyle, or change any part of that graphic.
+Replace only the chunky slab-serif "TermPlete" lettering below with a refined modern proportional sans-serif wordmark, medium weight, in the spirit of clean Swiss typography. Exact text: "TermPlete" (capital T and P). Elegant simple letterforms, no serifs, no slab feet, no bubble lettering, no chunky outline. Thoughtful kerning, medium rather than heavy strokes, considerably less bulky than the current lettering. Center the wordmark below the icon with comfortable breathing room; set its width approximately equal to the terminal window width rather than much wider. Use off-white lettering with only a very fine charcoal keyline for legibility on light and dark backgrounds.
+Output a finished high-resolution PNG with actual alpha transparency outside the logo; keep transparency, no new backdrop, no painted checkerboard, no additional text. Do not add effects, glow, shadows, decoration, or additional elements.
