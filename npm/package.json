@@ -1,6 +1,6 @@
 {
   "name": "termplete",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Terminal autocomplete that learns your choices",
   "license": "MIT",
   "repository": {
