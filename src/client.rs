@@ -151,7 +151,8 @@ mod tests {
                 cwd: None,
                 mode: None,
                 local_only: true,
-                frame: None
+                frame: None,
+                exclude: Vec::new(),
             }),
             9
         );

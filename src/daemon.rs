@@ -355,6 +355,7 @@ fn dispatch(state: &State, req: &Request) -> Response {
             mode,
             local_only,
             frame,
+            exclude,
         } => {
             let requested_cwd = cwd.as_deref().map(PathBuf::from);
             let requested_cwd = requested_cwd.as_deref().filter(|path| path.is_dir());
@@ -367,15 +368,17 @@ fn dispatch(state: &State, req: &Request) -> Response {
                 *local_only,
                 frame.unwrap_or(0),
                 requested_cwd,
+                exclude,
             )
         }
         Request::Generate {
             id,
             instruction,
             cwd,
+            exclude,
         } => {
             let cwd = cwd.as_deref().map(Path::new).filter(|path| path.is_dir());
-            generate_reply(state, *id, instruction, cwd)
+            generate_reply(state, *id, instruction, cwd, exclude)
         }
     }
 }
@@ -469,6 +472,7 @@ fn suggest_reply(
         local_only,
         frame,
         None,
+        &[],
     )
 }
 
@@ -483,10 +487,12 @@ fn suggest_reply_with_cwd(
     local_only: bool,
     frame: usize,
     cwd: Option<&Path>,
+    exclude: &[String],
 ) -> Response {
     let prefix = line_prefix(line, cursor);
     let modes = &state.cfg.modes;
     let mode = resolve_mode(state.cfg.mode, mode_override);
+    let more_request = !exclude.is_empty();
     let directory_command = crate::fs_context::is_directory_command(prefix);
     let decision_enabled = state.cfg.decision.active();
     let local_limit = if decision_enabled && directory_command {
@@ -494,13 +500,17 @@ fn suggest_reply_with_cwd(
     } else {
         suggest::suggestion_limit(modes.max_suggestions)
     };
+    let fetch_limit = local_limit.saturating_add(exclude.len());
 
     let current_local = || {
         let store = state.store.lock();
         if !directory_command {
-            return suggest::complete_local_with_cwd(&store, prefix, local_limit, cwd);
+            let mut candidates = suggest::complete_local_with_cwd(&store, prefix, fetch_limit, cwd);
+            candidates.retain(|candidate| !exclude.contains(&candidate.text));
+            return candidates;
         }
-        cwd.map(|cwd| crate::fs_context::candidates_with_context(prefix, cwd, local_limit, &store))
+        let mut candidates = cwd
+            .map(|cwd| crate::fs_context::candidates_with_context(prefix, cwd, fetch_limit, &store))
             .unwrap_or_default()
             .into_iter()
             .map(|text| {
@@ -522,7 +532,9 @@ fn suggest_reply_with_cwd(
                     text,
                 }
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        candidates.retain(|candidate| !exclude.contains(&candidate.text));
+        candidates
     };
     let local = current_local();
     if directory_command && local.is_empty() {
@@ -569,7 +581,8 @@ fn suggest_reply_with_cwd(
 
     // Repeated choices are direct evidence of what this user wants. Let that
     // preference win even when AI history selection is enabled.
-    if !relevant_context
+    if !more_request
+        && !relevant_context
         && state.store.lock().memory().has_trusted_choice_with_scope(
             prefix,
             cwd,
@@ -597,7 +610,11 @@ fn suggest_reply_with_cwd(
                 | suggest::Source::TerminalContext
         )
     });
-    if has_history && !relevant_context && !state.cfg.context.ai_select_history && !decision_enabled
+    if !more_request
+        && has_history
+        && !relevant_context
+        && !state.cfg.context.ai_select_history
+        && !decision_enabled
     {
         return history();
     }
@@ -606,7 +623,8 @@ fn suggest_reply_with_cwd(
         && (prefix.trim_start() == "docker"
             || prefix.trim_start() == "ffmpeg"
             || prefix.trim_start().starts_with("ffmpeg "));
-    let skip_common_command = modes.skip_for_common_commands
+    let skip_common_command = !more_request
+        && modes.skip_for_common_commands
         && !contextual_tool
         && !relevant_context
         && !decision_enabled
@@ -619,7 +637,10 @@ fn suggest_reply_with_cwd(
     // Hold the model back until the buffer looks like a command. This is the
     // difference between `subtle` and firing on every keystroke.
     let last_is_space = prefix.ends_with(' ');
-    if mode != Mode::Aggressive && !suggest::worth_llm(prefix, modes, last_is_space) {
+    if !more_request
+        && mode != Mode::Aggressive
+        && !suggest::worth_llm(prefix, modes, last_is_space)
+    {
         return deferred_context();
     }
 
@@ -730,6 +751,10 @@ fn suggest_reply_with_cwd(
         }
     }
 
+    suggest::append_exclude(&mut request, exclude);
+    request =
+        crate::privacy::sanitize_request_with_paths(&request, &state.cfg.decision.private_paths);
+
     // Without a usable provider or credential, history completions are the whole
     // story. This is not an error: the user may not have logged in yet.
     let (provider, credential, model) = match model_credential(state) {
@@ -740,7 +765,8 @@ fn suggest_reply_with_cwd(
         // The store lock is held only across prompt construction; the network
         // call must not block other shells from recording commands.
         let store = state.store.lock();
-        if has_history
+        if !more_request
+            && has_history
             && !relevant_context
             && state.cfg.context.ai_select_history
             && !prompt_only_fallback
@@ -792,6 +818,7 @@ fn suggest_reply_with_cwd(
         // AI selection is a reranker, never permission to invent another target.
         ai_candidates.retain(|command| selection_options.contains(command));
     }
+    ai_candidates.retain(|command| !exclude.contains(command));
     // Exact current-context continuations remain authoritative through model reranking.
     for candidate in local
         .iter()
@@ -831,8 +858,11 @@ fn suggest_reply_with_cwd(
     let mut candidates = ai_candidates;
     candidates.extend(local.into_iter().map(|c| c.text));
     let mut seen = std::collections::HashSet::new();
-    candidates.retain(|command| seen.insert(command.clone()));
+    candidates.retain(|command| !exclude.contains(command) && seen.insert(command.clone()));
     candidates.truncate(suggest::suggestion_limit(modes.max_suggestions));
+    if candidates.is_empty() && !exclude.is_empty() {
+        return diagnose(state, history(), "No new suggestions.".into());
+    }
 
     *state.last_issue.lock() = None;
     Response::Suggest {
@@ -846,7 +876,13 @@ fn suggest_reply_with_cwd(
     }
 }
 
-fn generate_reply(state: &State, id: u64, instruction: &str, cwd: Option<&Path>) -> Response {
+fn generate_reply(
+    state: &State,
+    id: u64,
+    instruction: &str,
+    cwd: Option<&Path>,
+    exclude: &[String],
+) -> Response {
     let mode = state.cfg.mode;
     let Some(instruction) = normalize_intent(instruction) else {
         return Response::Suggest {
@@ -925,6 +961,7 @@ fn generate_reply(state: &State, id: u64, instruction: &str, cwd: Option<&Path>)
                     .ranking
                     .iter()
                     .filter_map(|index| known.get(*index))
+                    .filter(|command| !exclude.contains(command))
                     .map(|command| Suggestion {
                         text: command.clone(),
                         source: suggest::Source::History,
@@ -932,7 +969,15 @@ fn generate_reply(state: &State, id: u64, instruction: &str, cwd: Option<&Path>)
                     })
                     .collect();
                 if selected.is_empty() {
-                    return diagnose(state, fallback(), "Decision only found no suitable known command. Use Decision + AI to generate commands for a task.".into());
+                    return diagnose(
+                        state,
+                        fallback(),
+                        if exclude.is_empty() {
+                            "Decision only found no suitable known command. Use Decision + AI to generate commands for a task.".into()
+                        } else {
+                            "No new suggestions.".into()
+                        },
+                    );
                 }
                 let mut response = from_local(id, &selected, "", state, 0, mode);
                 if let Response::Suggest {
@@ -972,6 +1017,9 @@ fn generate_reply(state: &State, id: u64, instruction: &str, cwd: Option<&Path>)
         Ok(resolved) => resolved,
         Err(issue) => return diagnose(state, fallback(), issue),
     };
+    suggest::append_exclude(&mut request, exclude);
+    request =
+        crate::privacy::sanitize_request_with_paths(&request, &state.cfg.decision.private_paths);
     request.model = model.clone();
     let reply = match state
         .http
@@ -980,15 +1028,20 @@ fn generate_reply(state: &State, id: u64, instruction: &str, cwd: Option<&Path>)
         Ok(reply) => reply,
         Err(error) => return diagnose(state, fallback(), error.to_string()),
     };
-    let candidates = suggest::sanitize_intent_candidates(
+    let mut candidates = suggest::sanitize_intent_candidates(
         &reply,
         suggest::suggestion_limit(state.cfg.modes.max_suggestions),
     );
+    candidates.retain(|command| !exclude.contains(command));
     let Some(first) = candidates.first() else {
         return diagnose(
             state,
             fallback(),
-            "The model returned no usable shell command.".into(),
+            if exclude.is_empty() {
+                "The model returned no usable shell command.".into()
+            } else {
+                "No new suggestions.".into()
+            },
         );
     };
 
@@ -1315,6 +1368,7 @@ mod tests {
             mode: None,
             local_only,
             frame: None,
+            exclude: Vec::new(),
         }
     }
 
@@ -1837,6 +1891,7 @@ mod tests {
                 id: 27,
                 cwd: Some(cwd.path().to_string_lossy().into_owned()),
                 instruction: "# find large files".into(),
+                exclude: Vec::new(),
             },
         );
         assert!(matches!(
@@ -1922,6 +1977,7 @@ mod tests {
                 id: 28,
                 cwd: None,
                 instruction: "#   ".into(),
+                exclude: Vec::new(),
             },
         );
         assert!(matches!(
@@ -1954,6 +2010,7 @@ mod tests {
                 id: 29,
                 cwd: None,
                 instruction: "show disk usage".into(),
+                exclude: Vec::new(),
             },
         );
         assert!(matches!(
@@ -2154,6 +2211,7 @@ mod tests {
                 mode: None,
                 local_only: false,
                 frame: None,
+                exclude: Vec::new(),
             },
         );
         assert!(matches!(suggest, Response::Error { id: 4, .. }));
@@ -2163,6 +2221,7 @@ mod tests {
             &Request::Generate {
                 id: 5,
                 instruction: "list files".into(),
+                exclude: Vec::new(),
                 cwd: None,
             },
         );

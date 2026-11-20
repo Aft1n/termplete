@@ -166,19 +166,22 @@ no TermPlete UI, and stale replies cannot restore dismissed content.
 | Action | Default key |
 | --- | --- |
 | Reveal or retry a suggestion | **Ctrl+G** |
-| Open selector / next option | **Tab** |
-| Previous option | **Shift+Tab** |
-| Navigate shell history | **Up / Down** |
+| Open selector / next option | **Tab / Down** in the selector |
+| Previous option | **Shift+Tab / Up** in the selector |
+| Navigate shell history | **Up / Down** when the selector is closed |
 | Insert the selected command | **Enter** in the selector or **Right Arrow** |
 | Insert the next suggested word (zsh) | **Option/Alt+Right Arrow** |
 | Close the selector | **Esc** |
 | Dismiss / interrupt | **Ctrl+C** |
 | Toggle TermPlete | **Ctrl+X Ctrl+X** |
 
-Up / Down always keep normal shell history and multiline navigation, including
-while suggestions are visible. While enabled,
+Up / Down browse the open selector and otherwise keep normal shell history and
+multiline navigation. While enabled,
 TermPlete owns Tab for suggestions. Enter in the selector and Right Arrow insert
 the highlighted command. **A separate Enter executes** it after the selector closes.
+After the visible options, a `+ 3 new suggestions` row asks the model for another
+batch that excludes everything already shown; Tab, Enter or Right Arrow on that
+row loads it.
 Option/Alt+Right inserts one word and leaves the rest as ghost text, so you can accept
 a useful prefix and replace the remaining arguments. Word boundaries follow
 zsh's normal forward-word behavior. Without a visible suggestion, Option/Alt+Right

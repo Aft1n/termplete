@@ -20,7 +20,7 @@ disabled_terminals = ["warp"] # use TermPlete everywhere except Warp
 min_chars = 2
 on_demand_debounce_ms = 220      # wait this long after a keystroke before asking
 automatic_debounce_ms = 400
-max_suggestions = 3
+max_suggestions = 3            # initial batch and each "new suggestions" batch
 
 [keys]
 reveal = "Ctrl+G"       # reveal a held suggestion

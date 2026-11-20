@@ -220,6 +220,9 @@ struct SuggestArgs {
     /// One-line reply for the native shell integration.
     #[arg(long)]
     shell_reply: bool,
+    /// Commands already shown; return only different alternatives.
+    #[arg(long = "exclude")]
+    exclude: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -843,6 +846,7 @@ fn suggest(args: SuggestArgs) -> termplete::Result<()> {
             cwd: std::env::current_dir()
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned()),
+            exclude: args.exclude,
         }
     } else {
         Request::Suggest {
@@ -855,6 +859,7 @@ fn suggest(args: SuggestArgs) -> termplete::Result<()> {
             cwd: std::env::current_dir()
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned()),
+            exclude: args.exclude,
         }
     };
     let timeout = Duration::from_millis(cfg.daemon.connect_timeout_ms.max(100))

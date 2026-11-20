@@ -1338,6 +1338,25 @@ pub fn build_intent_request(instruction: &str, max_suggestions: usize) -> ChatRe
     .with_sampling(sampling)
 }
 
+/// Tell the model not to repeat commands the selector already showed.
+pub fn append_exclude(request: &mut ChatRequest, exclude: &[String]) {
+    if exclude.is_empty() {
+        return;
+    }
+    let mut list = String::new();
+    for command in exclude {
+        list.push_str("- ");
+        list.push_str(command);
+        list.push('\n');
+    }
+    if let Some(message) = request.messages.get_mut(1) {
+        message.content.push_str(
+            "\n\nDo not return any command from this already-suggested list; return only new alternatives:\n",
+        );
+        message.content.push_str(&list);
+    }
+}
+
 pub fn build_intent_request_with_context_and_private_paths(
     instruction: &str,
     max_suggestions: usize,
@@ -2365,6 +2384,25 @@ mod tests {
             .content
             .contains("up to 3 distinct full commands"));
         assert!(req.messages[1].content.contains("one command per line"));
+    }
+
+    #[test]
+    fn exclusion_paragraph_lists_prior_commands_and_empty_list_changes_nothing() {
+        let s = Store::new(ContextConfig::default());
+        let mut req =
+            PromptBuilder::new(&Modes::default(), &ContextConfig::default()).build(&s, "ls", false);
+        let original = req.messages[1].content.clone();
+        append_exclude(&mut req, &[]);
+        assert_eq!(req.messages[1].content, original);
+
+        append_exclude(
+            &mut req,
+            &["git status".to_string(), "git log --oneline".to_string()],
+        );
+        let content = req.messages[1].content.as_str();
+        assert!(content.contains("already-suggested list"));
+        assert!(content.contains("- git status"));
+        assert!(content.contains("- git log --oneline"));
     }
 
     #[test]

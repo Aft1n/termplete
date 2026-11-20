@@ -1,6 +1,7 @@
 """Real PTY regression checks. Run after `cargo build` with python3 tests/terminal.py."""
 
 import errno
+import atexit
 import fcntl
 import http.server
 import json
@@ -9,6 +10,7 @@ from pathlib import Path
 import pty
 import re
 import select
+import shutil
 import signal
 import socket
 import struct
@@ -29,14 +31,48 @@ def selected_rows(colors):
     return [row for row in colors.splitlines() if re.search(r"\bbg=(?!default\b)", row)]
 
 
+_SESSION_HOMES = []
+
+
+def _shutdown_session_homes():
+    # Detached record/feedback workers may autostart a daemon after close(),
+    # so keep nudging each tracked socket until it is gone or a second passes.
+    for home in _SESSION_HOMES:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(.2)
+                    connection.connect(f"{home}/daemon.sock")
+                    connection.sendall(b'{"op":"shutdown","id":1}\n')
+                    connection.recv(4096)
+            except OSError:
+                pass
+            if not Path(home, "daemon.sock").exists():
+                break
+            time.sleep(.02)
+        shutil.rmtree(home, ignore_errors=True)
+
+
+atexit.register(_shutdown_session_homes)
+
+
 class Session:
     def __init__(self, args, terminal="xterm-256color", rows=24, cols=80, no_color=False, config=None, executable=None, rc=None, terminal_app=None, history=None, capture_output=False):
         self.home = tempfile.TemporaryDirectory(prefix="tp-terminal-")
+        _SESSION_HOMES.append(self.home.name)
         # Host startup files must not prompt or change these isolated sessions.
         (Path(self.home.name) / ".zshenv").write_text("unsetopt GLOBAL_RCS\n")
         config_dir = Path(self.home.name) / "termplete"
         config_dir.mkdir()
-        (config_dir / "config.toml").write_text(config or 'provider = "terminal-test"\n[daemon]\nidle_shutdown_secs = 1\n')
+        text = config or 'provider = "terminal-test"\n'
+        if "idle_shutdown_secs" not in text:
+            if re.search(r"^\[daemon\]\s*$", text, re.M):
+                text = re.sub(r"^\[daemon\]\s*$", "[daemon]\nidle_shutdown_secs = 1",
+                              text, count=1, flags=re.M)
+            else:
+                text += "\n[daemon]\nidle_shutdown_secs = 1\n"
+        (config_dir / "config.toml").write_text(text)
         if history is not None:
             (Path(self.home.name) / ".zsh_history").write_text(history)
         if rc is not None:
@@ -459,12 +495,12 @@ class TerminalTests(unittest.TestCase):
                 time.sleep(.05)
                 state = snapshot.read_text().splitlines()
                 count = int(state[2])
-                for _ in range(count):
+                for _ in range(count + 1):
                     candidates = state[3:3 + count]
                     selected = int(state[4 + count])
-                    if candidates[selected - 1] == resume:
+                    if selected <= count and candidates[selected - 1] == resume:
                         break
-                    s.send_menu(b"\t\x18b")
+                    s.send_menu(b"\x1b[B\x18b")
                     time.sleep(.05)
                     state = snapshot.read_text().splitlines()
                 candidates = state[3:3 + count]
@@ -1691,15 +1727,16 @@ declare -F _tp_complete > "$HOME/plugin-function"
                         break
                 self.assertEqual(snapshot.read_text().splitlines(), ["ffmpeg", variants[0], "3"])
                 keys = (b"\x0e",) * 4 if custom else defaults
-                for i, key in enumerate(keys, 1):
+                expected = ("", variants[2], variants[1], variants[0])
+                for key, ghost in zip(keys, expected):
                     s.send_menu(key + b"\x18b")
                     time.sleep(.08)
                     self.assertEqual(snapshot.read_text().splitlines(),
-                                     ["ffmpeg", variants[-i % 3], "3"])
+                                     ["ffmpeg", ghost, "3"])
                 s.send_menu(b"\x1b[C\x18b")
                 time.sleep(.08)
                 self.assertEqual(snapshot.read_text().splitlines()[:2],
-                                 ["ffmpeg" + variants[2], ""])
+                                 ["ffmpeg" + variants[0], ""])
                 self.assertEqual(os.waitpid(s.pid, os.WNOHANG), (0, 0))
                 s.send_menu(b"\x03exit 0\r")
                 self.assertEqual(s.wait(), 0)
@@ -1765,6 +1802,300 @@ declare -F _tp_complete > "$HOME/plugin-function"
                 self.assertEqual(os.waitpid(s.pid, os.WNOHANG), (0, 0))
                 s.send(b"\x03exit 0\r")
                 self.assertEqual(s.wait(), 0)
+
+    def test_zsh_selector_loads_three_new_variants_from_final_row(self):
+        task = "# make more variants"
+
+        def make_handler(tracked, repeat):
+            class Handler(http.server.BaseHTTPRequestHandler):
+                def do_POST(self):
+                    body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    tracked.append(body)
+                    prompt = body["messages"][1]["content"]
+                    old = repeat or "already-suggested list" not in prompt
+                    if old:
+                        content = "\n".join(f"$ printf OLD_{name} > old-marker"
+                                            for name in ("ONE", "TWO", "THREE"))
+                    else:
+                        content = "\n".join(f"$ printf NEW_{name} > new-marker"
+                                            for name in ("ONE", "TWO", "THREE"))
+                    response = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+
+                def log_message(self, *args):
+                    pass
+
+            return Handler
+
+        cases = (("enter", b"\r", False), ("tab", b"\t", False),
+                 ("no-new", b"\t", True))
+        for label, accept_key, repeat in cases:
+            with self.subTest(label=label):
+                requests = []
+                server = http.server.HTTPServer(("127.0.0.1", 0),
+                                                make_handler(requests, repeat))
+                self.addCleanup(server.server_close)
+                self.addCleanup(server.shutdown)
+                config = ('provider = "local-test"\nmodel = "test-model"\n[[providers]]\n'
+                          f'name = "local-test"\nbase_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+                          'no_auth = true\n')
+                rc = ('PROMPT="READY> "\ncd "$HOME"\nKEYTIMEOUT=1\n'
+                      'autoload -Uz add-zsh-hook\n'
+                      '_tp_test_preexec() { print -r -- "$1" > "$HOME/executed"; }\n'
+                      'add-zsh-hook preexec _tp_test_preexec\n'
+                      f'eval "$(\"{BIN}\" init --print zsh)"\n'
+                      '_tp_snapshot() { print -rl -- "$BUFFER" "$_TP_MENU_OPEN" '
+                      '"$_TP_CANDIDATE_INDEX" "$_TP_MORE_AVAILABLE" "$_TP_ISSUE" '
+                      '"$_TP_FULL" > "$HOME/state"; '
+                      'print -r -- "$POSTDISPLAY" > "$HOME/menu"; }\n'
+                      'zle -N _tp_snapshot; bindkey "^Xb" _tp_snapshot\n')
+                s = self.session(["-i"], executable="/bin/zsh", rc=rc, config=config)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                s.read_until(b"READY> ")
+                snapshot = Path(s.home.name, "state")
+                menu = Path(s.home.name, "menu")
+                start = s.send_menu(task.encode() + b"\r")
+                s.read_until(b"1/3", after=start)
+                s.send_menu(b"\x18b")
+                state = snapshot.read_text().splitlines()
+                self.assertEqual(state[:4], [task, "1", "1", "1"])
+                shown = menu.read_text()
+                self.assertIn("TermPlete  1/3", shown)
+                self.assertIn("  + 3 new suggestions", shown)
+                self.assertNotIn("> + 3 new suggestions", shown)
+
+                # The final row is a load-more action, not a fourth command.
+                for index in ("2", "3", "4"):
+                    s.send_menu(b"\x1b[B\x18b")
+                    self.assertEqual(snapshot.read_text().splitlines()[:3],
+                                     [task, "1", index])
+                shown = menu.read_text()
+                self.assertEqual(snapshot.read_text().splitlines()[3], "1")
+                self.assertIn("TermPlete  More suggestions", shown)
+                self.assertIn("> + 3 new suggestions", shown)
+                self.assertIn("Tab/Enter/Right load 3 new | Esc close", shown)
+                self.assertEqual(len(requests), 1)
+
+                start = s.send_menu(accept_key)
+                s.read_until(b"No new suggestions." if repeat else b"4/6", after=start)
+                s.send_menu(b"\x18b")
+                state = snapshot.read_text().splitlines()
+                if repeat:
+                    self.assertEqual(state[:5], [task, "1", "3", "0", "No new suggestions."])
+                    shown = menu.read_text()
+                    self.assertIn("No new suggestions.", shown)
+                    self.assertNotIn("+ 3 new suggestions", shown)
+                    self.assertEqual(len(requests), 2)
+                    self.assertIn("already-suggested list", json.dumps(requests[1]))
+                    for name in ("ONE", "TWO", "THREE"):
+                        self.assertIn(f"OLD_{name}", json.dumps(requests[1]))
+                    self.assertFalse(Path(s.home.name, "new-marker").exists())
+                    s.send(b"\x03exit 0\r")
+                    self.assertEqual(s.wait(), 0)
+                    continue
+
+                self.assertEqual(state, [task, "1", "4", "1", "",
+                                         "printf NEW_ONE > new-marker"])
+                shown = menu.read_text()
+                self.assertIn("TermPlete  4/6", shown)
+                self.assertIn("> printf NEW_ONE > new-marker", shown)
+                self.assertIn("  printf NEW_TWO > new-marker", shown)
+                self.assertEqual(len(requests), 2)
+                self.assertIn("already-suggested list", json.dumps(requests[1]))
+                for name in ("ONE", "TWO", "THREE"):
+                    self.assertIn(f"OLD_{name}", json.dumps(requests[1]))
+
+                # Walk to the end of the loaded batch, then back to its first new row.
+                for keys, index in ((b"\x1b[B", "5"), (b"\x1b[B", "6"),
+                                    (b"\x1b[B", "7"), (b"\x1b[A", "6"),
+                                    (b"\x1b[A", "5"), (b"\x1b[A", "4")):
+                    s.send_menu(keys + b"\x18b")
+                    self.assertEqual(snapshot.read_text().splitlines()[:3],
+                                     [task, "1", index])
+                shown = menu.read_text()
+                self.assertEqual(snapshot.read_text().splitlines()[5],
+                                 "printf NEW_ONE > new-marker")
+                self.assertIn("> printf NEW_ONE > new-marker", shown)
+                self.assertEqual(len(requests), 2)
+
+                # Accepting the first new variant never executes it.
+                s.send_menu(b"\r\x18b")
+                self.assertEqual(snapshot.read_text().splitlines()[:2],
+                                 ["printf NEW_ONE > new-marker", "0"])
+                self.assertEqual(len(requests), 2)
+                self.assertFalse(Path(s.home.name, "executed").exists())
+                self.assertFalse(Path(s.home.name, "new-marker").exists())
+                self.assertFalse(Path(s.home.name, "old-marker").exists())
+                s.send(b"\x03exit 0\r")
+                self.assertEqual(s.wait(), 0)
+
+    def test_zsh_more_row_reaches_model_for_local_shortcuts(self):
+        requests = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                content = ("$ git log --stat\n$ git log -p\n$ git log --name-only")
+                body = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        config = ('provider = "local-test"\nmodel = "test-model"\nmode = "on-demand"\n[[providers]]\n'
+                  f'name = "local-test"\nbase_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+                  'no_auth = true\n')
+        rc = ('PROMPT="READY> "\ncd "$HOME"\nKEYTIMEOUT=1\n'
+              f'eval "$(\"{BIN}\" init --print zsh)"\n'
+              '_tp_snapshot() { print -rl -- "$BUFFER" "$_TP_MENU_OPEN" '
+              '"$_TP_CANDIDATE_INDEX" "${#_TP_CANDIDATES}" "$_TP_MORE_AVAILABLE" '
+              '"$_TP_ISSUE" "$_TP_FULL" > "$HOME/state"; '
+              'print -r -- "$POSTDISPLAY" > "$HOME/menu"; }\n'
+              'zle -N _tp_snapshot; bindkey "^Xb" _tp_snapshot\n')
+        s = self.session(["-i"], executable="/bin/zsh", rc=rc, config=config)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        s.read_until(b"READY> ")
+        snapshot = Path(s.home.name, "state")
+        menu = Path(s.home.name, "menu")
+        s.send_menu(b"git l")
+        s.send_menu(b"\t")
+        s.read_until(b"1/3")
+        s.send_menu(b"\x18b")
+        self.assertEqual(snapshot.read_text().splitlines()[:5],
+                         ["git l", "1", "1", "3", "1"])
+        # Common commands stay local until the user asks for new alternatives.
+        self.assertEqual(len(requests), 0)
+        for index in ("2", "3", "4"):
+            s.send_menu(b"\x1b[B\x18b")
+            self.assertEqual(snapshot.read_text().splitlines()[:3], ["git l", "1", index])
+        shown = menu.read_text()
+        self.assertIn("> + 3 new suggestions", shown)
+        self.assertIn("Tab/Enter/Right load 3 new | Esc close", shown)
+
+        start = s.send_menu(b"\r")
+        s.read_until(b"4/6", after=start)
+        s.send_menu(b"\x18b")
+        state = snapshot.read_text().splitlines()
+        self.assertEqual(state, ["git l", "1", "4", "6", "1", "",
+                                 "git log --stat"])
+        self.assertEqual(len(requests), 1)
+        prompt = json.dumps(requests[0]["messages"][1]["content"])
+        self.assertIn("already-suggested list", prompt)
+        for command in ("git log", "git log --oneline", "git log --graph --oneline --all"):
+            self.assertIn(command, prompt)
+        self.assertIn("> git log --stat", menu.read_text())
+        s.send(b"\x03exit 0\r")
+        self.assertEqual(s.wait(), 0)
+
+    def test_zsh_more_row_queues_while_request_in_flight(self):
+        requests = []
+        held = threading.Event()
+        release = threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                requests.append(body)
+                prompt = body["messages"][1]["content"]
+                more = "already-suggested list" in prompt
+                if more and len(requests) == 2:
+                    held.set()
+                    release.wait(5)
+                if not more:
+                    names = ("OLD_ONE", "OLD_TWO", "OLD_THREE")
+                    marker = "old-marker"
+                elif len(requests) == 2:
+                    names = ("NEW_ONE", "NEW_TWO", "NEW_THREE")
+                    marker = "new-marker"
+                else:
+                    content = "No new suggestions."
+                    response = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                    return
+                content = "\n".join(f"$ printf {name} > {marker}" for name in names)
+                response = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(release.set)
+        config = ('provider = "local-test"\nmodel = "test-model"\n[[providers]]\n'
+                  f'name = "local-test"\nbase_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+                  'no_auth = true\n')
+        rc = ('PROMPT="READY> "\ncd "$HOME"\nKEYTIMEOUT=1\n'
+              f'eval "$(\"{BIN}\" init --print zsh)"\n'
+              '_tp_snapshot() { print -rl -- "$BUFFER" "$_TP_MENU_OPEN" '
+              '"$_TP_CANDIDATE_INDEX" "${#_TP_CANDIDATES}" "$_TP_MORE_PENDING" '
+              '"$_TP_ISSUE" > "$HOME/state"; '
+              'print -r -- "$POSTDISPLAY" > "$HOME/menu"; }\n'
+              'zle -N _tp_snapshot; bindkey "^Xb" _tp_snapshot\n')
+        s = self.session(["-i"], executable="/bin/zsh", rc=rc, config=config)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        s.read_until(b"READY> ")
+        snapshot = Path(s.home.name, "state")
+        menu = Path(s.home.name, "menu")
+        task = "# queue a new batch"
+        start = s.send_menu(task.encode() + b"\r")
+        s.read_until(b"1/3", after=start)
+        for index in ("2", "3", "4"):
+            s.send_menu(b"\x1b[B\x18b")
+            self.assertEqual(snapshot.read_text().splitlines()[:3], [task, "1", index])
+
+        s.send_menu(b"\r")
+        self.assertTrue(held.wait(4))
+        # A second activation while the first load is in flight is queued and
+        # shows loading immediately instead of launching another request.
+        s.send_menu(b"\r\x18b")
+        state = snapshot.read_text().splitlines()
+        self.assertEqual(state[:4], [task, "1", "4", "3"])
+        self.assertEqual(state[4], "1")
+        self.assertIn("TermPlete  Loading 3 new suggestions...", menu.read_text())
+        self.assertEqual(len(requests), 2)
+
+        release.set()
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline and len(requests) < 3:
+            time.sleep(.05)
+        self.assertEqual(len(requests), 3)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            s.send_menu(b"\x18b")
+            state = snapshot.read_text().splitlines()
+            if state[4] == "0" and state[5] == "No new suggestions.":
+                break
+            time.sleep(.05)
+        self.assertEqual(state[:4], [task, "1", "4", "6"])
+        self.assertEqual(state[4:], ["0", "No new suggestions."])
+        prompt = json.dumps(requests[2]["messages"][1]["content"])
+        self.assertIn("already-suggested list", prompt)
+        for name in ("OLD_ONE", "OLD_TWO", "OLD_THREE",
+                     "NEW_ONE", "NEW_TWO", "NEW_THREE"):
+            self.assertIn(name, prompt)
+        s.send(b"\x03exit 0\r")
+        self.assertEqual(s.wait(), 0)
 
     def test_zsh_alt_right_accepts_words_and_keeps_the_remaining_suggestion(self):
         command = "printf résumé ~/developer/my-project --wrong"
@@ -2412,7 +2743,7 @@ declare -F _tp_complete > "$HOME/plugin-function"
                         self.assertEqual(Path(s.home.name, "state").read_text().strip(),
                                          "echo HISTORY_TWO")
 
-    def test_zsh_populated_selector_arrows_return_to_history(self):
+    def test_zsh_populated_selector_arrows_browse_candidates(self):
         for keymap in ("emacs", "viins"):
             for capture in (False, True):
                 for up, down in ((b"\x1b[A", b"\x1b[B"), (b"\x1bOA", b"\x1bOB")):
@@ -2434,7 +2765,7 @@ declare -F _tp_complete > "$HOME/plugin-function"
                               '_TP_CANDIDATE_INDEX=1; _TP_MENU_OPEN=1; _TP_REVEALED=1; '
                               '_tp_select_candidate; }\n'
                               '_tp_snapshot() { print -rl -- "$BUFFER" "$_TP_MENU_OPEN" '
-                              '"$_TP_FULL" > "$HOME/state"; }\n'
+                              '"$_TP_CANDIDATE_INDEX" "$_TP_FULL" > "$HOME/state"; }\n'
                               'zle -N _ready_menu; zle -N _tp_snapshot\n'
                               f'bindkey -M {keymap} "^Xp" _ready_menu\n'
                               f'bindkey -M {keymap} "^Xb" _tp_snapshot\n')
@@ -2443,13 +2774,17 @@ declare -F _tp_complete > "$HOME/plugin-function"
                                          capture_output=capture,
                                          history=': 10:0;echo HISTORY_ONE\n: 20:0;echo HISTORY_TWO\n')
                         s.read_until(b"READY> ")
-                        # Keep Up/Down consecutive so native prefix search can
-                        # retain its original cursor across history entries.
-                        s.send_menu(b"\x18p" + up + up + down + b"\x18b")
-                        self.assertEqual(Path(s.home.name, "state").read_text().splitlines(),
-                                         ["echo HISTORY_TWO", "0", ""])
+                        snapshot = Path(s.home.name, "state")
+                        s.send_menu(b"\x18p")
+                        # Up wraps index 1 to the last candidate; Down wraps back.
+                        s.send_menu(up + b"\x18b")
+                        self.assertEqual(snapshot.read_text().splitlines(),
+                                         ["echo ", "1", "2", "echo SUGGESTION_TWO"])
+                        s.send_menu(down + b"\x18b")
+                        self.assertEqual(snapshot.read_text().splitlines(),
+                                         ["echo ", "1", "1", "echo SUGGESTION_ONE"])
 
-    def test_tab_selector_browsing_preserves_shell_arrows(self):
+    def test_zsh_selector_arrows_browse_without_shell_widgets(self):
         for keymap in ("emacs", "viins"):
             with self.subTest(keymap=keymap):
                 rc = (f'bindkey -{"e" if keymap == "emacs" else "v"}\n'
@@ -2479,11 +2814,18 @@ declare -F _tp_complete > "$HOME/plugin-function"
                     colors = Path(s.home.name, "colors").read_text()
                     self.assertEqual(len(selected_rows(colors)), 1)
                     self.assertIn("fg=16,bg=51,bold", colors)
-                # Up exits the populated selector and invokes the user's widget.
-                s.send_menu(b"\x1b[A\x1b[B\x18b")
+                # A populated selector keeps Up/Down for browsing instead of
+                # invoking the user's bound shell widgets.
+                s.send_menu(b"\x1b[A\x18b")
                 state = snapshot.read_text().splitlines()
-                self.assertEqual(state[0], "git lUPDOWN")
-                self.assertEqual(state[2:4], ["", "0"])
+                self.assertEqual(state[:2], ["git l", "5"])
+                self.assertEqual(state[2], "")
+                self.assertEqual(state[3:], ["1", "4"])
+                s.send_menu(b"\x1b[B\x18b")
+                state = snapshot.read_text().splitlines()
+                self.assertEqual(state[:2], ["git l", "5"])
+                self.assertEqual(state[2], "git log")
+                self.assertEqual(state[3:], ["1", "1"])
                 s.send_menu(b"\x03exit 0\r")
                 self.assertEqual(s.wait(), 0)
 
@@ -2530,16 +2872,26 @@ declare -F _tp_complete > "$HOME/plugin-function"
         self.assertEqual(snapshot.read_text().splitlines()[3:], ["0", "0"])
         s.send_menu(b"\r")
         s.read_until(b"GENERATED_TWO")
+        # The generated selector opens with candidate 1 already selected.
+        # The first Tab confirms that selection instead of advancing.
         s.send_menu(b"\t\x18b")
-        state = snapshot.read_text().splitlines()
-        self.assertEqual(state, ["# create a marker file", "",
-                                "printf GENERATED_TWO > generated-marker", "1", "2"])
+        self.assertEqual(snapshot.read_text().splitlines(),
+                         ["# create a marker file", "",
+                          "printf GENERATED_ONE > generated-marker", "1", "2"])
+        s.send_menu(b"\t\x18b")
+        self.assertEqual(snapshot.read_text().splitlines(),
+                         ["# create a marker file", "",
+                          "printf GENERATED_TWO > generated-marker", "1", "2"])
+        s.send_menu(b"\x1b[Z\x18b")
+        self.assertEqual(snapshot.read_text().splitlines(),
+                         ["# create a marker file", "",
+                          "printf GENERATED_ONE > generated-marker", "1", "2"])
         self.assertEqual(len(requests), 1)
         self.assertIn("create a marker file", json.dumps(requests[0]))
         self.assertFalse(Path(s.home.name, "generated-marker").exists())
         s.send_menu(b"\r\x18b")
         self.assertEqual(snapshot.read_text().splitlines(),
-                         ["printf GENERATED_TWO > generated-marker", "", "", "0", "0"])
+                         ["printf GENERATED_ONE > generated-marker", "", "", "0", "0"])
         self.assertFalse(Path(s.home.name, "generated-marker").exists())
         s.send_menu(b"\r")
         s.read_until(b"READY> ")
@@ -2547,8 +2899,79 @@ declare -F _tp_complete > "$HOME/plugin-function"
         while not Path(s.home.name, "generated-marker").exists() and time.monotonic() < deadline:
             s.send_menu(b"\x18b")
             time.sleep(.05)
-        self.assertEqual(Path(s.home.name, "generated-marker").read_text(), "GENERATED_TWO")
+        self.assertEqual(Path(s.home.name, "generated-marker").read_text(), "GENERATED_ONE")
         s.send_menu(b"exit 0\r")
+        self.assertEqual(s.wait(), 0)
+
+    def test_zsh_enter_retries_task_after_closed_or_failed_selector(self):
+        requests = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                if len(requests) == 1:
+                    content = "No shell command was generated for that task."
+                else:
+                    content = ("$ printf RETRIED_ONE > retried-marker\n"
+                               "$ printf RETRIED_TWO > retried-marker")
+                body = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        config = ('provider = "local-test"\nmodel = "test-model"\n[[providers]]\n'
+                  f'name = "local-test"\nbase_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+                  'no_auth = true\n')
+        rc = ('PROMPT="READY> "\ncd "$HOME"\nKEYTIMEOUT=1\n'
+              f'eval "$(\"{BIN}\" init --print zsh)"\n'
+              '_tp_snapshot() { print -rl -- "$BUFFER" "$_TP_GHOST" "$_TP_FULL" '
+              '"$_TP_MENU_OPEN" "${#_TP_CANDIDATES}" > "$HOME/state"; }\n'
+              'zle -N _tp_snapshot; bindkey "^Xb" _tp_snapshot\n')
+        s = self.session(["-i"], executable="/bin/zsh", rc=rc, config=config)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        s.read_until(b"READY> ")
+        snapshot = Path(s.home.name, "state")
+        s.send_menu(b"# install marker")
+        start = s.send_menu(b"\r")
+        s.read_until(b"no usable shell command", after=start)
+        self.assertEqual(len(requests), 1)
+        self.assertIn("install marker", json.dumps(requests[0]))
+        s.send_menu(b"\x18b")
+        self.assertEqual(snapshot.read_text().splitlines(),
+                         ["# install marker", "", "", "1", "0"])
+
+        # A second Enter on the same task retries generation rather than
+        # running the comment.
+        start = s.send_menu(b"\r")
+        s.read_until(b"RETRIED_ONE", after=start)
+        s.send_menu(b"\x18b")
+        self.assertEqual(snapshot.read_text().splitlines(),
+                         ["# install marker", "",
+                          "printf RETRIED_ONE > retried-marker", "1", "2"])
+        self.assertEqual(len(requests), 2)
+
+        # Esc closes a populated selector; editing the task and pressing Enter
+        # must generate again, not run the line as a comment.
+        s.send_menu(b"\x1b")
+        s.send_menu(b" now")
+        start = s.send_menu(b"\r")
+        s.read_until(b"RETRIED_ONE", after=start)
+        s.send_menu(b"\x18b")
+        self.assertEqual(snapshot.read_text().splitlines(),
+                         ["# install marker now", "",
+                          "printf RETRIED_ONE > retried-marker", "1", "2"])
+        self.assertEqual(len(requests), 3)
+        self.assertIn("install marker now", json.dumps(requests[2]))
+        self.assertFalse(Path(s.home.name, "retried-marker").exists())
+        s.send(b"\x03exit 0\r")
         self.assertEqual(s.wait(), 0)
 
     def test_pasted_comment_and_installation_execute_as_shell_input(self):
@@ -2687,7 +3110,8 @@ declare -F _tp_complete > "$HOME/plugin-function"
                 break
             time.sleep(.05)
         self.assertEqual(snapshot.read_text().splitlines(),
-                          ["docker", "3", "docker compose -f project-compose.yml ps", "docker ps", "docker images"])
+                          ["docker", "3", "docker compose -f project-compose.yml ps", "docker ps",
+                           "docker images"])
         self.assertEqual(len(requests), 2)
         self.assertIn("project-compose.yml", requests[-1]["messages"][-1]["content"])
         s.send_menu(b"\t\x1b[B\x18b")
@@ -2735,7 +3159,8 @@ declare -F _tp_complete > "$HOME/plugin-function"
         rc = ('PROMPT="READY> "\n'
               f'eval "$(\"{BIN}\" init --print zsh)"\n'
               '_tp_snapshot() { print -rl -- "$BUFFER" "$_TP_GHOST" '
-              '"${#_TP_CANDIDATES}" > "$HOME/buffer"; }\n'
+              '"${#_TP_CANDIDATES}" > "$HOME/buffer"; '
+              'print -r -- "$POSTDISPLAY" > "$HOME/menu"; }\n'
               'zle -N _tp_snapshot; bindkey "^Xb" _tp_snapshot\n')
         s = self.session(["-i"], executable="/bin/zsh", rc=rc)
         s.read_until(b"READY> ")
@@ -2748,9 +3173,8 @@ declare -F _tp_complete > "$HOME/plugin-function"
             time.sleep(.08)
             if snapshot.read_text().splitlines()[1] == "us":
                 break
-        s.data = b""
-        s.send_menu(b"\x1b[Z\x18b")
-        self.assertIn(b"TermPlete  1/1", ANSI.sub(b"", s.data))
+        s.send_menu(b"\x1b[Z\x1b[Z\x18b")
+        self.assertIn("TermPlete  1/1", Path(s.home.name, "menu").read_text())
         time.sleep(.08)
         self.assertEqual(snapshot.read_text().splitlines(), ["git stat", "us", "1"])
         s.send_menu(b"\x03exit 0\r")
@@ -2798,11 +3222,15 @@ declare -F _tp_complete > "$HOME/plugin-function"
             if snapshot.read_text().splitlines()[1] == "cker ps":
                 break
         s.send_menu(b"\t")
-        for suffix in ("cker ps", "cker images", "cker compose up", "cker ps"):
-            s.send_menu(b"\x18b")
+        s.send_menu(b"\x18b")
+        self.assertEqual(snapshot.read_text().splitlines(), ["do", "cker ps", "3"])
+        for suffix in ("cker images", "cker compose up"):
+            s.send_menu(b"\t\x18b")
             time.sleep(.08)
             self.assertEqual(snapshot.read_text().splitlines(), ["do", suffix, "3"])
-            s.send_menu(b"\t")
+        s.send_menu(b"\x1b[Z\x18b")
+        time.sleep(.08)
+        self.assertEqual(snapshot.read_text().splitlines(), ["do", "cker images", "3"])
         self.assertEqual(len(requests), 1)
         s.send_menu(b"\x1b[C\x18b")
         time.sleep(.08)
@@ -2832,12 +3260,13 @@ declare -F _tp_complete > "$HOME/plugin-function"
         self.assertEqual(snapshot.read_text(), "ffmpeg\n -i input.mp4 output.mp4\n")
         s.send_menu(b"\t")
         for suffix in (" -i input.mp4 output.mp4", " -i input.mp4 -vn output.mp3",
-                       " -i input.mp4 -vf scale=1280:-2 output.mp4", " -i input.mp4 output.mp4"):
+                       " -i input.mp4 -vf scale=1280:-2 output.mp4"):
             s.send_menu(b"\x18b")
             time.sleep(.1)
             self.assertEqual(snapshot.read_text(), f"ffmpeg\n{suffix}\n")
-            s.send_menu(b"\t")
-        s.send_menu(b"\x1b[C\x18b")
+            if suffix != " -i input.mp4 -vf scale=1280:-2 output.mp4":
+                s.send_menu(b"\t")
+        s.send_menu(b"\x1b[Z\x1b[C\x18b")
         time.sleep(.1)
         self.assertEqual(snapshot.read_text(), "ffmpeg -i input.mp4 -vn output.mp3\n\n")
         self.assertEqual(os.waitpid(s.pid, os.WNOHANG), (0, 0))
@@ -2995,7 +3424,7 @@ declare -F _tp_complete > "$HOME/plugin-function"
                 s.send_menu(b"\x1a\x18b")
                 self.assertEqual(snapshot.read_text().splitlines()[:2], ["git l", "og"])
                 s.send_menu(b"\x1b[27;6;90~\x18b")
-                self.assertEqual(snapshot.read_text().splitlines()[3], "3")
+                self.assertEqual(snapshot.read_text().splitlines()[3], "4")
                 self.assertIn("_old_key", Path(s.home.name, "old-binding").read_text())
                 self.assertIn("_tp_reveal", Path(s.home.name, "z-binding").read_text())
                 s.send_menu(b"\x15\x0e\x18b")
@@ -3075,6 +3504,7 @@ declare -F _tp_complete > "$HOME/plugin-function"
         config = ('provider = "terminal-test"\nmode = "on-demand"\n[keys]\n'
                   'reveal = "^N"\naccept = "^Y"\ncycle = "^P"\n'
                   'dismiss = "^D"\ntoggle = "^T"\n')
+        expected = config + '\n[daemon]\nidle_shutdown_secs = 1\n'
         for save in (False, True):
             with self.subTest(save=save):
                 s = self.session(["settings"], config=config)
@@ -3088,7 +3518,7 @@ declare -F _tp_complete > "$HOME/plugin-function"
                 s.read_until(b"1/7")
                 for label in (b"Reveal: Ctrl+G", b"Right Arrow", b"Shift+Tab", b"Ctrl+X Ctrl+X"):
                     self.assertIn(label, s.data)
-                self.assertEqual(Path(s.home.name, "termplete/config.toml").read_text(), config)
+                self.assertEqual(Path(s.home.name, "termplete/config.toml").read_text(), expected)
                 s.data = b""
                 s.send_menu(b"q")
                 s.read_until(b"1/6")
@@ -3101,7 +3531,7 @@ declare -F _tp_complete > "$HOME/plugin-function"
                         self.assertIn(f'{key} = "{value}"', saved)
                     self.assertIn('mode = "on-demand"', saved)
                 else:
-                    self.assertEqual(saved, config)
+                    self.assertEqual(saved, expected)
 
     def test_dumb_terminal_uses_numbered_picker_without_escapes(self):
         s = self.session(["settings"], terminal="dumb")

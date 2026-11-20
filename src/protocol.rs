@@ -32,6 +32,9 @@ pub enum Request {
         /// Animation frame index the shell is currently on.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frame: Option<usize>,
+        /// Commands already shown; ask only for different alternatives.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
     },
     /// Turn a natural-language shell task into command suggestions.
     Generate {
@@ -39,6 +42,9 @@ pub enum Request {
         instruction: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// Commands already shown; ask only for different alternatives.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
     },
     /// Preserve unexecuted pasted input as context, without learning usage.
     ObserveInput {
@@ -167,11 +173,13 @@ mod tests {
                 mode: Some("eager".into()),
                 local_only: false,
                 frame: Some(3),
+                exclude: Vec::new(),
             },
             Request::Generate {
                 cwd: None,
                 id: 12,
                 instruction: "find files larger than 100 MB".into(),
+                exclude: Vec::new(),
             },
             Request::Record {
                 cwd: Some("/tmp/project".into()),

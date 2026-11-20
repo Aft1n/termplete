@@ -164,7 +164,7 @@ prove that an installation succeeded. Typing a different target overrides it.
 | Ctrl+G | Reveal or retry a suggestion |
 | Tab | Open the selector; move to the next option when already open |
 | Shift+Tab | Move to the previous option |
-| Up / Down | Navigate shell history; dismiss the selector |
+| Up / Down | Move through options while the selector is open; otherwise navigate shell history |
 | Right Arrow | Insert the selected suggestion into the prompt |
 | Option/Alt+Right Arrow | Insert the next suggested word (zsh) |
 | Esc | Close the selector |
@@ -172,10 +172,13 @@ prove that an installation succeeded. Typing a different target overrides it.
 | Ctrl+X Ctrl+X | Toggle TermPlete |
 | Enter | Accept the highlighted option when the selector is open; otherwise execute the prompt |
 
-Up / Down retain ordinary shell history and multiline navigation, even when
-the selector is open. Tab and Shift+Tab browse suggestions. While TermPlete is enabled, Tab belongs to its suggestions rather than falling through
+Up / Down move through the open selector and otherwise retain ordinary shell
+history and multiline navigation. Tab and Shift+Tab also browse suggestions. While TermPlete is enabled, Tab belongs to its suggestions rather than falling through
 to filename completion. Browsing returned alternatives does not make another
-AI request. A single model response can supply multiple options.
+AI request. After the last returned option, a `+ 3 new suggestions` row asks the
+model for another batch that excludes everything already shown; Tab, Enter or
+Right Arrow on that row loads it. A single model response can supply multiple
+options.
 
 Enter and Right Arrow perform the same acceptance action in the selector:
 they insert the selected command and close the menu. Press Enter again to run

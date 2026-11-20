@@ -25,8 +25,8 @@ fi
 # Install by sourcing this from ~/.zshrc:
 #     eval "$(tp init --print zsh)"
 #
-# Ctrl+G reveals a suggestion. Tab opens and cycles a selector; Right Arrow
-# inserts the selected command; Option/Alt+Right inserts one word. Automatic mode shows ghost text as you type;
+# Ctrl+G reveals a suggestion. Tab opens and cycles a selector; Up/Down also
+# cycle while it is open, Right Arrow inserts the selected command; Option/Alt+Right inserts one word. Automatic mode shows ghost text as you type;
 # On demand waits for a reveal. Tab stays within the suggestion selector.
 #
 # POSTDISPLAY lets ZLE draw inline ghost text without changing BUFFER. Only
@@ -81,6 +81,11 @@ typeset -gi _TP_SELECTION_EXPLICIT=0
 typeset -g  _TP_PENDING=""      # suggestion held back, awaiting a reveal
 typeset -g  _TP_REVEALED=0      # 1 once the user has pressed reveal
 typeset -gi _TP_MENU_OPEN=0
+typeset -gi _TP_MENU_AUTO=0     # selector opened without a Tab/cycle
+typeset -gi _TP_MORE_AVAILABLE=0
+typeset -g  _TP_MORE_ID=""
+typeset -gi _TP_MORE_PENDING=0
+typeset -gi _TP_MAX_SUGGESTIONS=3
 typeset -gi _TP_PASTED=0
 typeset -g _TP_LAST_COMMAND="" _TP_LAST_COMMAND_CWD=""
 typeset -g  _TP_REQUEST_BUFFER=""
@@ -116,6 +121,10 @@ _tp_load_settings() {
   debounce=$("$_TP_BIN" config get --key "$key" 2>/dev/null)
   [[ $debounce == <-> ]] || debounce=220
   _TP_DEBOUNCE_MS=$debounce
+  local maxsug
+  maxsug=$("$_TP_BIN" config get --key max_suggestions 2>/dev/null)
+  [[ $maxsug == <-> && $maxsug -gt 0 ]] || maxsug=3
+  _TP_MAX_SUGGESTIONS=$maxsug
   _TP_AI_HISTORY=$("$_TP_BIN" config get --key ai_select_history 2>/dev/null)
   _TP_DECISION_STRATEGY=$("$_TP_BIN" config get --key decision.strategy 2>/dev/null)
   [[ -n $_TP_DECISION_STRATEGY ]] || _TP_DECISION_STRATEGY=llm
@@ -305,10 +314,15 @@ _tp_render() {
     (( width = width > 4 ? width - 2 : 2 ))
     (( height = height > 5 ? height - 4 : 1 ))
     (( height > 5 )) && height=5
+    local -i slots=${#_TP_CANDIDATES}
+    (( _TP_MORE_AVAILABLE && slots )) && (( slots++ ))
     (( first = ((_TP_CANDIDATE_INDEX - 1) / height) * height + 1 ))
     (( last = first + height - 1 ))
-    (( last > ${#_TP_CANDIDATES} )) && last=${#_TP_CANDIDATES}
+    (( last > slots )) && last=slots
     line="TermPlete  $_TP_CANDIDATE_INDEX/${#_TP_CANDIDATES}"
+    if (( _TP_CANDIDATE_INDEX > ${#_TP_CANDIDATES} && slots > ${#_TP_CANDIDATES} )); then
+      line="TermPlete  More suggestions"
+    fi
     if (( ${#_TP_CANDIDATES} == 0 )); then
       line="TermPlete  No suggestions - tp status"
       if [[ -n $_TP_FD ]]; then
@@ -317,13 +331,18 @@ _tp_render() {
           animate=1
         fi
       fi
+    elif [[ -n $_TP_MORE_ID ]] || (( _TP_MORE_PENDING )); then
+      line="TermPlete  Loading $_TP_MAX_SUGGESTIONS new suggestions..."
+      if (( motion )); then
+        animate=1
+      fi
     fi
     line=${line[1,$width]}
     display+=$'\n'
     (( start = ${#BUFFER} + ${#display} ))
     display+=$line
     (( color )) && highlights+=("$start $(( start + ${#line} )) fg=$_TP_ACCENT_COLOR,bold memo=termplete")
-    if (( color && ${#_TP_CANDIDATES} && ${#line} > 10 )); then
+    if (( color && ${#_TP_CANDIDATES} && _TP_CANDIDATE_INDEX <= ${#_TP_CANDIDATES} && ${#line} > 10 )); then
       local count_color=green
       (( _TP_PULSE > 2 )) && count_color=white
       highlights+=("$(( start + 10 )) $(( start + ${#line} )) fg=$count_color,bold memo=termplete")
@@ -339,7 +358,7 @@ _tp_render() {
         highlights+=("$(( start + left )) $(( start + right )) fg=white,bold memo=termplete")
       fi
     fi
-    if (( ${#_TP_CANDIDATES} == 0 )) && [[ -n $_TP_ISSUE && -z $_TP_FD ]]; then
+    if [[ -n $_TP_ISSUE && -z $_TP_FD ]]; then
       line=${_TP_ISSUE[1,$width]}
       display+=$'\n'
       (( start = ${#BUFFER} + ${#display} ))
@@ -347,8 +366,13 @@ _tp_render() {
       (( color )) && highlights+=("$start $(( start + ${#line} )) fg=yellow memo=termplete")
     fi
     for (( index=first; index <= last; index++ )); do
-      line="  ${_TP_CANDIDATES[$index]}"
-      (( index == _TP_CANDIDATE_INDEX )) && line="> ${_TP_CANDIDATES[$index]}"
+      if (( index > ${#_TP_CANDIDATES} )); then
+        line="  + $_TP_MAX_SUGGESTIONS new suggestions"
+        (( index == _TP_CANDIDATE_INDEX )) && line="> + $_TP_MAX_SUGGESTIONS new suggestions"
+      else
+        line="  ${_TP_CANDIDATES[$index]}"
+        (( index == _TP_CANDIDATE_INDEX )) && line="> ${_TP_CANDIDATES[$index]}"
+      fi
       if (( ${#line} > width )); then
         line="${line[1,$(( width - 1 ))]}~"
       fi
@@ -359,7 +383,9 @@ _tp_render() {
         highlights+=("$start $(( start + ${#line} )) $_TP_SELECTION_STYLE memo=termplete")
       fi
     done
-    line="Tab/Shift+Tab browse | Enter/Right accept | Alt+Right word | Esc close"
+    line="Tab/Up next | Shift+Tab/Down prev | Enter/Right accept | Esc close"
+    (( _TP_CANDIDATE_INDEX > ${#_TP_CANDIDATES} && slots > ${#_TP_CANDIDATES} )) &&
+      line="Tab/Enter/Right load $_TP_MAX_SUGGESTIONS new | Esc close"
     (( ${#_TP_CANDIDATES} == 0 )) && line="$_TP_REVEAL_LABEL retry | Esc close"
     line=${line[1,$width]}
     display+=$'\n'
@@ -399,6 +425,7 @@ _tp_render() {
 _tp_close_menu() {
   if (( _TP_MENU_OPEN )); then
     _TP_MENU_OPEN=0
+    _TP_MENU_AUTO=0
     _TP_PULSE=0
     _tp_render
   else
@@ -425,12 +452,31 @@ _tp_tab() {
     _tp_dismiss
     return 0
   fi
+  if (( _TP_MENU_OPEN )) && _tp_on_more_row; then
+    _tp_load_more
+    return 0
+  fi
   _tp_filter_candidates
   if (( ${#_TP_CANDIDATES} )); then
     if (( _TP_MENU_OPEN )); then
-      _tp_cycle_forward
+      if _tp_on_more_row; then
+        _tp_load_more
+        return 0
+      fi
+      if (( _TP_MENU_AUTO )); then
+        # An auto-opened selector already highlights the first candidate.
+        # The first Tab confirms it instead of skipping to the next.
+        _TP_MENU_AUTO=0
+        _TP_SELECTION_EXPLICIT=1
+        _tp_select_candidate
+        _tp_refine_common
+        _tp_render
+      else
+        _tp_cycle_forward
+      fi
     else
       _TP_MENU_OPEN=1
+      _TP_MENU_AUTO=0
       _TP_SELECTION_EXPLICIT=0
       _tp_start_pulse
       _TP_REVEALED=1
@@ -464,6 +510,8 @@ _tp_cancel_inflight() {
   zf_rm -f "$_TP_TMP/reply.$id" 2>/dev/null
   { exec {_TP_FD}>&- } 2>/dev/null
   _TP_FD=""
+  _TP_MORE_ID=""
+  _TP_MORE_PENDING=0
   [[ $id == "$_TP_REQ_ID" ]] && (( _TP_REQ_ID++ ))
 }
 
@@ -510,10 +558,70 @@ _tp_on_reply() {
     _tp_render
     return 0
   fi
+  if [[ -n $id && $id == "$_TP_MORE_ID" ]]; then
+    _TP_MORE_ID=""
+    local -a fields more_new old_candidates
+    local issue="" candidate old seen new_candidate
+    old_candidates=("${_TP_ALL_CANDIDATES[@]}")
+    fields=("${(@ps:\t:)reply}")
+    case ${fields[1]:-N} in
+      C|R) more_new=("${fields[@]:1}");;
+      E) issue=${fields[2]:-"No new suggestions."};;
+    esac
+    for candidate in "${more_new[@]}"; do
+      candidate="${candidate#${candidate%%[![:space:]]*}}"
+      [[ -n $candidate ]] || continue
+      seen=0
+      for old in "${old_candidates[@]}"; do
+        old="${old#${old%%[![:space:]]*}}"
+        [[ $old == "$candidate" ]] && { seen=1; break; }
+      done
+      (( seen )) || _TP_ALL_CANDIDATES+=("$candidate")
+    done
+    local -i added=$(( ${#_TP_ALL_CANDIDATES} - ${#old_candidates} )) index new_index=0
+    if (( added > 0 )); then
+      _TP_ISSUE=""
+      _TP_MENU_OPEN=1
+      _TP_MENU_AUTO=0
+      _TP_REVEALED=1
+      _TP_SELECTION_EXPLICIT=1
+      _TP_MORE_AVAILABLE=1
+      _tp_filter_candidates
+      for (( index=1; index <= ${#_TP_CANDIDATES}; index++ )); do
+        new_candidate="${_TP_CANDIDATES[$index]}"
+        new_candidate="${new_candidate#${new_candidate%%[![:space:]]*}}"
+        seen=0
+        for old in "${old_candidates[@]}"; do
+          old="${old#${old%%[![:space:]]*}}"
+          [[ $old == "$new_candidate" ]] && { seen=1; break; }
+        done
+        if (( ! seen )); then
+          new_index=$index
+          break
+        fi
+      done
+      (( new_index )) && _TP_CANDIDATE_INDEX=$new_index
+      _tp_select_candidate
+    else
+      _TP_MORE_AVAILABLE=0
+      _TP_ISSUE=${issue:-"No new suggestions."}
+      (( _TP_CANDIDATE_INDEX > ${#_TP_CANDIDATES} )) && _TP_CANDIDATE_INDEX=${#_TP_CANDIDATES}
+      (( _TP_CANDIDATE_INDEX )) || _TP_CANDIDATE_INDEX=1
+      _tp_select_candidate || {
+        _TP_FULL=""
+        _TP_GHOST=""
+        _TP_PENDING=""
+      }
+    fi
+    _tp_flush_more_pending
+    _tp_render
+    return 0
+  fi
   if [[ -n $reply && $id == "$_TP_REQ_ID" ]]; then
     local -a fields
     fields=("${(@ps:\t:)reply}")
     _TP_ISSUE=""
+    _TP_MORE_AVAILABLE=0
     _TP_ALL_CANDIDATES=()
     case ${fields[1]} in
       C) _TP_ALL_CANDIDATES=("${fields[@]:1}");;
@@ -545,6 +653,7 @@ _tp_on_reply() {
       fi
     fi
     if (( ${#_TP_CANDIDATES} )); then
+      _TP_MORE_AVAILABLE=1
       if (( selection_pinned )); then
         # Keep a user's Tab choice even if the refreshed ranking omitted it.
         _tp_select_candidate || {
@@ -565,6 +674,7 @@ _tp_on_reply() {
     if (( ! ${#_TP_CANDIDATES} )); then
       _TP_CANDIDATE_INDEX=1
       _TP_SELECTION_EXPLICIT=0
+      _TP_MORE_AVAILABLE=0
       _TP_FULL=""
       _TP_GHOST=""
       _TP_PENDING=""
@@ -576,15 +686,21 @@ _tp_on_reply() {
     _TP_DIRTY=0
     _tp_request "$LBUFFER" 0 1
   fi
+  _tp_flush_more_pending
   # Publish the reply only after its callback has finished changing state.
   _tp_render
 }
 
 # Spawn a detached fetch and watch its fifo. Returns immediately.
 _tp_request() {
-  local buffer=$1 intent=${2:-0} force_current=${3:-0}
+  local buffer=$1 intent=${2:-0} force_current=${3:-0} more=${4:-0}
   [[ $buffer != *$'\n'* && $buffer != *$'\r'* && $BUFFER != *$'\n'* && $BUFFER != *$'\r'* ]] || return 0
   local typed=${buffer#${buffer%%[![:space:]]*}}
+  # A normal request replaces any earlier task context. Leaving a stale task
+  # buffer would make _tp_on_reply drop every reply for this line.
+  if (( intent != 1 )) && [[ $typed != \#* && -n $_TP_INTENT_BUFFER ]]; then
+    _TP_INTENT_BUFFER=""
+  fi
   local -i context_refine=0
   # Only refetch a coalesced dirty edit while the user is completing a bare
   # command. Once arguments are present, a reply that already extends the
@@ -606,7 +722,7 @@ _tp_request() {
   [[ -z $RBUFFER ]] || return 0
   # A reply for `do` may already extend `docker`, but it can contain just one
   # guess. Fetch the complete bare-tool options rather than pinning that reply.
-  if (( context_refine == 0 && force_current == 0 )); then
+  if (( more == 0 && context_refine == 0 && force_current == 0 )); then
     [[ $intent != 1 && -n $_TP_FULL && $_TP_FULL == "$buffer"?* && $typed != docker && $typed != ffmpeg ]] && return 0
   fi
   [[ $intent == 1 || $typed != \#* ]] || return 0
@@ -615,11 +731,12 @@ _tp_request() {
     _TP_DIRTY=1
     return 0
   fi
-  if (( context_refine == 0 && force_current == 0 )); then
+  if (( more == 0 && context_refine == 0 && force_current == 0 )); then
     [[ $_TP_REQUEST_BUFFER == "$buffer" && -n $_TP_PENDING ]] && return 0
   fi
   _TP_REQUEST_BUFFER=$buffer
   _TP_ISSUE=""
+  (( more == 0 )) && _TP_MORE_ID=""
   [[ $intent == 1 ]] && _TP_INTENT_BUFFER=$buffer
   (( _TP_REQ_ID++ ))
   local id=$_TP_REQ_ID
@@ -644,18 +761,25 @@ _tp_request() {
   # zsh prints `[2] 9208` on every suggestion and floods the prompt.
   (
     local reply="" instruction
+    local -a exclude_args
+    if (( more )); then
+      local seen
+      for seen in "${_TP_ALL_CANDIDATES[@]}"; do
+        exclude_args+=(--exclude "$seen")
+      done
+    fi
     # History has its own short delay and never waits for the model debounce.
     if [[ $intent == 1 ]]; then
       instruction=${buffer#*\#}
-      reply=$("$_TP_BIN" suggest --intent --shell-reply -- "$instruction" 2>/dev/null) || reply=$'E\tSuggestion service unavailable - tp status'
-    elif (( ! context_refine )) && [[ $_TP_AI_HISTORY != true && $contextual_tool != 1 && $_TP_DECISION_STRATEGY == llm ]]; then
+      reply=$("$_TP_BIN" suggest --intent --shell-reply "${exclude_args[@]}" -- "$instruction" 2>/dev/null) || reply=$'E\tSuggestion service unavailable - tp status'
+    elif (( more == 0 && ! context_refine )) && [[ $_TP_AI_HISTORY != true && $contextual_tool != 1 && $_TP_DECISION_STRATEGY == llm ]]; then
       sleep 0.03
       reply=$("$_TP_BIN" suggest --local-only --shell-reply --mode "$request_mode" --frame "$_TP_FRAME" --cursor "${#buffer}" -- "$buffer" 2>/dev/null)
     fi
     if [[ $intent != 1 && $reply != C$'\t'* &&
           ($request_mode != on-demand || $reply != R$'\t'*) ]]; then
-      sleep $(( _TP_DEBOUNCE_MS / 1000.0 ))
-      reply=$("$_TP_BIN" suggest --shell-reply --mode "$request_mode" --frame "$_TP_FRAME" --cursor "${#buffer}" -- "$buffer" 2>/dev/null) || reply=$'E\tSuggestion service unavailable - tp status'
+      (( more )) || sleep $(( _TP_DEBOUNCE_MS / 1000.0 ))
+      reply=$("$_TP_BIN" suggest --shell-reply --mode "$request_mode" --frame "$_TP_FRAME" --cursor "${#buffer}" "${exclude_args[@]}" -- "$buffer" 2>/dev/null) || reply=$'E\tSuggestion service unavailable - tp status'
     fi
     print -r -- "$reply"
   ) >"$fifo" 2>/dev/null &!
@@ -665,9 +789,11 @@ _tp_request() {
   { exec {_TP_FD}<>"$fifo" } 2>/dev/null || {
     zf_rm -f "$fifo" 2>/dev/null
     _TP_FD=""
+    (( more )) && _TP_MORE_ID=""
     return 0
   }
   _TP_INFLIGHT[$_TP_FD]=$id
+  (( more )) && _TP_MORE_ID=$id
   zle -F -w "$_TP_FD" _tp_on_reply
 }
 
@@ -711,6 +837,7 @@ _tp_filter_candidates() {
 _tp_select_candidate() {
   (( _TP_GLOBAL_ENABLED && _TP_ENABLED )) || return 1
   [[ -z $RBUFFER ]] || return 1
+  (( _TP_CANDIDATE_INDEX <= ${#_TP_CANDIDATES} )) || return 1
   local candidate=${_TP_CANDIDATES[$_TP_CANDIDATE_INDEX]}
   candidate="${candidate#${candidate%%[![:space:]]*}}"
   local typed="${LBUFFER#${LBUFFER%%[![:space:]]*}}"
@@ -730,6 +857,35 @@ _tp_select_candidate() {
     [[ $_TP_FULL != "$previous" || -z $previous_ghost ]] && _tp_start_pulse
   fi
   return 0
+}
+
+_tp_on_more_row() {
+  (( _TP_MENU_OPEN && _TP_MORE_AVAILABLE && _TP_CANDIDATE_INDEX > ${#_TP_CANDIDATES} ))
+}
+
+# Ask the daemon for a new batch that excludes everything already shown.
+_tp_load_more() {
+  _tp_on_more_row || return 1
+  if [[ -n $_TP_FD ]]; then
+    _TP_MORE_PENDING=1
+    _tp_render
+    return 0
+  fi
+  local -i intent=0
+  [[ -n $_TP_INTENT_BUFFER && $BUFFER == "$_TP_INTENT_BUFFER" ]] && intent=1
+  _tp_request "$LBUFFER" "$intent" 1 1
+  _tp_render
+  return 0
+}
+
+_tp_flush_more_pending() {
+  (( _TP_MORE_PENDING )) || return 0
+  _TP_MORE_PENDING=0
+  [[ -z $_TP_FD ]] || return 0
+  (( ${#_TP_CANDIDATES} )) || return 0
+  local -i intent=0
+  [[ -n $_TP_INTENT_BUFFER && $BUFFER == "$_TP_INTENT_BUFFER" ]] && intent=1
+  _tp_request "$LBUFFER" "$intent" 1 1
 }
 
 # Reveal is separate from acceptance, even when a request is still in flight.
@@ -772,6 +928,10 @@ _tp_refine_common() {
 
 _tp_accept() {
   (( _TP_GLOBAL_ENABLED && _TP_ENABLED )) || return 1
+  if _tp_on_more_row; then
+    _tp_load_more
+    return 0
+  fi
   local -i word_only=${1:-0} start=${#LBUFFER} end
   local prefix=$BUFFER command
   if [[ -n $_TP_INTENT_BUFFER && $BUFFER == "$_TP_INTENT_BUFFER" && -n $_TP_FULL ]]; then
@@ -852,8 +1012,8 @@ _tp_cycle_forward() {
   _tp_cycle_by 1
 }
 
-# Up/Down always keep shell history and multiline navigation, even while a
-# suggestion selector is open. Tab and Shift+Tab browse suggestions.
+# A populated selector owns Up/Down for browsing. Otherwise they keep shell
+# history and multiline navigation.
 _tp_history_arrow() {
   local slot="$KEYMAP:${(V)KEYS}" original
   original=${_TP_ARROW_WIDGET[$slot]}
@@ -866,13 +1026,44 @@ _tp_history_arrow() {
   zle "$original"
 }
 
-_tp_up() { _tp_history_arrow up-line-or-history; }
-_tp_down() { _tp_history_arrow down-line-or-history; }
+_tp_up() {
+  if (( _TP_MENU_OPEN && ${#_TP_CANDIDATES} )); then
+    _tp_cycle_by -1
+  else
+    _tp_history_arrow up-line-or-history
+  fi
+}
+
+_tp_down() {
+  if (( _TP_MENU_OPEN && ${#_TP_CANDIDATES} )); then
+    _tp_cycle_by 1
+  else
+    _tp_history_arrow down-line-or-history
+  fi
+}
 
 _tp_enter() {
   if (( ! _TP_GLOBAL_ENABLED || ! _TP_ENABLED )) || [[ $BUFFER == *$'\n'* || $BUFFER == *$'\r'* ]]; then
     _tp_dismiss
     zle _tp_original_accept_line
+    return 0
+  fi
+  local typed=${BUFFER#${BUFFER%%[![:space:]]*}}
+  if (( ! _TP_PASTED )) && [[ $typed == \#* && -n ${${typed#\#}//[[:space:]]/} ]]; then
+    # A task line is a request for commands, not a line to run. Enter accepts
+    # a visible candidate; otherwise it (re)generates for the current text.
+    # This keeps a closed or empty selector from needing a fresh line.
+    if (( _TP_MENU_OPEN )) && _tp_accept; then
+      return 0
+    fi
+    _tp_dismiss
+    _TP_MENU_OPEN=1
+    _TP_MENU_AUTO=1
+    _TP_REVEALED=1
+    _TP_SELECTION_EXPLICIT=0
+    CURSOR=${#BUFFER}
+    _tp_request "$BUFFER" 1
+    _tp_render
     return 0
   fi
   if (( _TP_MENU_OPEN )); then
@@ -881,27 +1072,39 @@ _tp_enter() {
     # Never send the incomplete prefix to the shell from this state.
     return 0
   fi
-  local typed=${BUFFER#${BUFFER%%[![:space:]]*}}
-  if (( ! _TP_PASTED )) && [[ $typed == \#* && -n ${${typed#\#}//[[:space:]]/} && -z $_TP_INTENT_BUFFER ]]; then
-    _tp_dismiss
-    _TP_MENU_OPEN=1
-    _TP_REVEALED=1
-    CURSOR=${#BUFFER}
-    _tp_request "$BUFFER" 1
-    _tp_render
-    return 0
-  fi
   _tp_dismiss
   zle _tp_original_accept_line
 }
 
 _tp_cycle_by() {
   _TP_REVEALED=1
-  _tp_filter_candidates
+  _TP_MENU_AUTO=0
+  local -i was_more=0
+  _tp_on_more_row && was_more=1
+  if (( was_more )); then
+    _TP_CANDIDATE_INDEX=$(( ${#_TP_CANDIDATES} + 1 ))
+  else
+    _tp_filter_candidates
+  fi
   local attempt direction=${1:-1}
-  (( ${#_TP_CANDIDATES} )) && _TP_MENU_OPEN=1
-  for (( attempt=0; attempt < ${#_TP_CANDIDATES}; attempt++ )); do
-    (( _TP_CANDIDATE_INDEX = (_TP_CANDIDATE_INDEX - 1 + direction + ${#_TP_CANDIDATES}) % ${#_TP_CANDIDATES} + 1 ))
+  local -i slots=${#_TP_CANDIDATES}
+  (( _TP_MORE_AVAILABLE && slots )) && (( slots++ ))
+  (( slots )) || {
+    _tp_reveal
+    return
+  }
+  (( slots > ${#_TP_CANDIDATES} )) && _TP_MENU_OPEN=1
+  for (( attempt=0; attempt < slots; attempt++ )); do
+    (( _TP_CANDIDATE_INDEX = (_TP_CANDIDATE_INDEX - 1 + direction + slots) % slots + 1 ))
+    if (( _TP_CANDIDATE_INDEX > ${#_TP_CANDIDATES} )); then
+      # The final slot loads a new batch instead of previewing a command.
+      _TP_SELECTION_EXPLICIT=1
+      _TP_PENDING=""
+      _TP_FULL=""
+      _TP_GHOST=""
+      _tp_render
+      return 0
+    fi
     if _tp_select_candidate; then
       _TP_SELECTION_EXPLICIT=1
       _tp_render
@@ -930,6 +1133,10 @@ _tp_clear_state() {
   _TP_SELECTION_EXPLICIT=0
   _TP_REVEALED=0
   _TP_MENU_OPEN=0
+  _TP_MENU_AUTO=0
+  _TP_MORE_AVAILABLE=0
+  _TP_MORE_ID=""
+  _TP_MORE_PENDING=0
 }
 
 _tp_dismiss() {
@@ -1212,6 +1419,10 @@ _tp_line_init() {
   _TP_SELECTION_EXPLICIT=0
   _TP_REVEALED=0
   _TP_MENU_OPEN=0
+  _TP_MENU_AUTO=0
+  _TP_MORE_AVAILABLE=0
+  _TP_MORE_ID=""
+  _TP_MORE_PENDING=0
   _TP_DIRTY=0
   _TP_PULSE=0
   _tp_render
