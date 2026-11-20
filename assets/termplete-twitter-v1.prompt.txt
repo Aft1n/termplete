@@ -1,0 +1,27 @@
+Generated with the built-in imagegen tool.
+Reference: assets/termplete-logo-v2.png
+
+Use case: ads-marketing.
+Asset type: a finished premium product presentation image for a Twitter / X post. Single landscape 16:9 canvas, ideally 1920 x 1080 pixels. This is a brand campaign graphic, with exceptionally beautiful, carefully spaced typography and precise editorial alignment.
+
+Input image 1: the official TermPlete logo, supporting brand identity reference. Use its terminal mark and TermPlete wordmark faithfully. Preserve the white terminal border, three emerald dots, white chevron, white and gray completion strokes, emerald cursor, and correct camel-case spelling TermPlete. Integrate this real identity into the finished layout. The supplied surrounding haze is not a required design element.
+
+Design: premium contemporary developer-tool launch graphic. Deep near-black charcoal background, warm off-white typography, precise emerald accents from the logo. Crisp flat editorial composition, generous breathing room, quiet fine rules, sophisticated Swiss typographic hierarchy, optical kerning, a confident large grotesk sans-serif headline. Restrained atmosphere behind the terminal mark only. No busy decoration. Make it feel meticulously art-directed and immediately legible in a social feed.
+
+Composition: wide canvas with roughly 7% outer margins. Left 57% contains a small widely tracked category label, then the oversized headline in three carefully balanced lines, then four evenly spaced feature bullets. Right 38% contains the official terminal logo symbol as a large polished hero, with the official TermPlete wordmark directly beneath it. Keep the complete logo recognizable; place it as a coherent visual unit with ample breathing room. A thin quiet bottom rule and one small compatibility footer balance the composition. All text stays inside safe margins. No cards or feature tiles.
+
+Text verbatim, render spelling perfectly:
+Small eyebrow: "TERMINAL AUTOCOMPLETE"
+Large headline with these line breaks:
+"Autocomplete
+that learns
+your workflow."
+Four feature bullets, one per line, each preceded by a small emerald circular bullet:
+"Instant suggestions from your history"
+"Learns which commands you choose"
+"AI that understands terminal context"
+"Local or hosted models. Your choice."
+Brand wordmark under the symbol: "TermPlete"
+Small bottom footer: "zsh + Bash  /  macOS + Linux"
+
+The headline is the primary typography; bullets are generous and highly readable, no microscopic text. The right-side logo is the primary visual. Emerald is limited to the mark and bullet dots. Keep background quiet, shadows restrained, edges precise. No additional text, no invented product interface, no Twitter logos, no extra logos, no watermarks, no stock photos, no 3D objects, no neon grid, no floating decorations. Output a complete opaque finished marketing image.

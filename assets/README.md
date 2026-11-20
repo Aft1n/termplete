@@ -4,6 +4,8 @@
 | --- | --- |
 | [termplete-logo-v2.png](termplete-logo-v2.png) | Current logo: terminal graphic with the revised sans-serif wordmark |
 | [termplete-logo-v2.prompt.txt](termplete-logo-v2.prompt.txt) | Recorded image-generation prompt; design provenance, not runtime instructions |
+| [termplete-twitter-v1.png](termplete-twitter-v1.png) | Wide product presentation for Twitter / X with the logo and four feature bullets |
+| [termplete-twitter-v1.prompt.txt](termplete-twitter-v1.prompt.txt) | Presentation image prompt and logo reference |
 | [termplete-preview.gif](termplete-preview.gif) | Optimized animated preview embedded in the README |
 | [termplete-preview.mp4](termplete-preview.mp4) | Higher-quality 45-second demo linked from the animated preview |
 | [termplete-preview.jpg](termplete-preview.jpg) | Still frame at 42 seconds retained for static contexts |
